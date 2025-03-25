@@ -23,7 +23,7 @@ TOPDIR=$(git rev-parse --show-toplevel 2>/dev/null)
 
 ## cp ${RPMDIR}/SOURCES/* ${CURDIR}/rpmbuild/SOURCES
 ## cp ${RPMDIR}/SPECS/tigervnc.spec ${CURDIR}/rpmbuild/SPECS
-sed -i "s/@VERSION@/${VERSION}/" ${CURDIR}/rpmbuild/SPECS/tigervnc.spec
+## sed -i "s/@VERSION@/${VERSION}/" ${CURDIR}/rpmbuild/SPECS/tigervnc.spec
 
 ## Copy over the source code
 
