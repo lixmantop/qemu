@@ -1,0 +1,27 @@
+name: Build
+
+on: [push, pull_request]
+
+
+jobs:
+          
+  build-packages:
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        target:
+          - rocky9
+      fail-fast: false
+    runs-on: ubuntu-latest
+    env:
+      DOCKER: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t qemu/$DOCKER .github/containers/$DOCKER
+      - name: Build 
+        run: .github/containers/$DOCKER/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Packages (${{ matrix.target }})
+          path: .github/containers/${{ matrix.target }}/result
