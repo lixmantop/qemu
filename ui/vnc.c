@@ -65,11 +65,41 @@ static const struct timeval VNC_REFRESH_LOSSY = { 2, 0 };
 #include "vnc_keysym.h"
 #include "crypto/cipher.h"
 
+static const char *socket_path = "/tmp/vnc_jpeg_cuda";
+
+struct jpeg_compress_in {
+	int width;
+	int height;
+	int size;
+	int stride;
+	bool raz_cache;
+	char *socket_path;//max 255
+};
+struct jpeg_compress_out {
+	int x;
+	int y;
+	int w;
+	int h;
+	int etat; // 0=error 1=ok -1=last update area
+	int lenght;
+};
+typedef struct jpeg_compress_in jpeg_compress_in;
+typedef struct jpeg_compress_out jpeg_compress_out;
+
+
+
+/**/
 static QTAILQ_HEAD(, VncDisplay) vnc_displays =
     QTAILQ_HEAD_INITIALIZER(vnc_displays);
 
 static int vnc_cursor_define(VncState *vs);
 static void vnc_update_throttle_offset(VncState *vs);
+
+int vnc_framebuffer_update_cuda(VncState *vs, int x, int y, int w, int h,
+                            int32_t encoding);
+void vnc_init_cuda(VncState *vs);
+void vnc_clear_cuda(VncState *vs);
+
 
 static void vnc_set_share_mode(VncState *vs, VncShareMode mode)
 {
@@ -682,6 +712,150 @@ void vnc_framebuffer_update(VncState *vs, int x, int y, int w, int h,
     vnc_write_s32(vs, encoding);
 }
 
+
+
+int vnc_framebuffer_update_cuda(VncState *vs, int x, int y, int w, int h,
+                            int32_t encoding)
+{
+
+
+
+	int ret=0;
+	int sock = -1;
+	jpeg_compress_in *recv_buf;
+	jpeg_compress_out *send_buf;
+	recv_buf= malloc(sizeof(jpeg_compress_in));
+	send_buf = malloc(sizeof(jpeg_compress_out));
+	int size_bufret= 65535;
+	char *bufret =  (char *) malloc(sizeof(char)*size_bufret);
+
+	int data_len = 0;
+	struct sockaddr_un remote;
+	char *bufInOut;
+	int pixelsize=4;
+	int stride=0;
+	int nbrect=0;
+	VncDisplay *vd = vs->vd;
+	bufInOut = vnc_server_fb_ptr(vd, x, y);
+
+		if(sock == -1) {
+			if ((sock = socket(AF_UNIX, SOCK_STREAM, 0)) == -1) {
+				printf("Client: Error on socket() call \n");
+				return 0;
+			}
+
+			remote.sun_family = AF_UNIX;
+			char temp[255];
+			sprintf(temp,"%s%d",socket_path,vd->cuda_slot);
+			strcpy(remote.sun_path, temp);
+			data_len = strlen(remote.sun_path) + sizeof(remote.sun_family);
+
+			if (connect(sock, (struct sockaddr*) &remote, data_len) == -1) {
+				printf("Client: Error on connect call \n");
+				return 0;
+			}
+		}
+
+		if (stride == 0)
+			stride = w;
+
+		recv_buf->height = h;
+		recv_buf->width = w;
+		recv_buf->size = (stride * h * pixelsize);//+stride*2;
+
+		recv_buf->stride=stride;
+		recv_buf->raz_cache=vd->cuda_init;
+		vd->cuda_init = false;
+		// header *************************************************
+		ret = 0;
+		int valsend = 0;
+		valsend = send(sock, recv_buf, sizeof(jpeg_compress_in),0);
+		if (valsend != sizeof(jpeg_compress_in)) { // if (valsend <= 0)
+			close(sock);
+			sock = -1;
+			return 0;
+		}
+		// header *************************************************
+
+		//data *****************************************************
+		ret = 0;
+		valsend = 0;
+		do {
+			valsend = send(sock, bufInOut + ret, recv_buf->size - ret, 0);
+			if (valsend <= 0) {
+				close(sock);
+				sock = -1;
+				return 0;
+			}
+			ret = ret + valsend;
+		} while (ret != recv_buf->size);
+		//data *****************************************************
+
+		// retour encodage jpeg
+		while(true) {
+				// header *************************************************
+				valsend = recv(sock, send_buf, sizeof(jpeg_compress_out),	MSG_WAITALL);
+				if (valsend !=sizeof(jpeg_compress_out)) { //if (valsend <= 0) {
+					close(sock);
+					printf("********** header Erreur ret!= lenght !!!\n");
+					sock = -1;
+					return 0;
+				}
+
+				if(send_buf->etat==1) {// mode normal
+					//data *****************************************************
+					if(size_bufret < send_buf->lenght) {
+						if(bufret != NULL)
+							free(bufret);
+						bufret =  (char *) malloc(sizeof(char)* send_buf->lenght);
+						size_bufret = send_buf->lenght;
+					}
+					ret = recv(sock, bufret, send_buf->lenght, MSG_WAITALL);
+					if (ret!= send_buf->lenght) { //if (ret <= 0) {
+						close(sock);
+						sock = -1;
+						printf("********** data Erreur ret!= lenght !!!\n");
+						return 0;
+					}
+				//	printf("x=%d y=%d w=%d h=%d size=%d \n",send_buf->x,send_buf->y,send_buf->w,send_buf->h,send_buf->lenght);
+					vnc_write_u16(vs, send_buf->x);
+					vnc_write_u16(vs, send_buf->y);
+					vnc_write_u16(vs, send_buf->w);
+					vnc_write_u16(vs, send_buf->h);
+					vnc_write_s32(vs, 21); //jpeg
+					vnc_write_u32(vs,send_buf->lenght); // lenght
+					vnc_write(vs, bufret, send_buf->lenght); // data
+					nbrect++;
+				} else if(send_buf->etat==-1){ // last area
+					break;
+				} else if(send_buf->etat==0){ //error
+					// vide le tampon
+					ret = recv(sock, bufret, send_buf->lenght, MSG_WAITALL);
+					if (ret <= 0) {
+						close(sock);
+						sock = -1;
+						return 0;
+					}
+				}
+//				retour->data= bufret;
+//				retour->lenght=send_buf->lenght;
+
+		}
+
+		free(send_buf);
+		free(recv_buf);
+		free(bufret);
+		if (sock != 0) {
+				close(sock);
+				sock=-1;
+			}
+
+		//vs->has_dirty=nbrect;
+		//printf("nbrect=%d\n",nbrect);
+    return nbrect;
+}
+
+
 static void vnc_desktop_resize_ext(VncState *vs, int reject_reason)
 {
     trace_vnc_msg_server_ext_desktop_resize(
@@ -973,8 +1147,12 @@ int vnc_send_framebuffer_update(VncState *vs, int x, int y, int w, int h)
             n = vnc_zywrle_send_framebuffer_update(vs, x, y, w, h);
             break;
         default:
-            vnc_framebuffer_update(vs, x, y, w, h, VNC_ENCODING_RAW);
-            n = vnc_raw_send_framebuffer_update(vs, x, y, w, h);
+        	if(vs->vd->cuda_slot==-1) {
+				vnc_framebuffer_update(vs, x, y, w, h, VNC_ENCODING_RAW);
+				n = vnc_raw_send_framebuffer_update(vs, x, y, w, h);
+        	} else {
+        		n=vnc_framebuffer_update_cuda(vs, x, y, w, h, VNC_ENCODING_RAW);
+        	}
             break;
     }
     return n;
@@ -1175,35 +1353,42 @@ static int vnc_update_client(VncState *vs, int has_dirty)
     width = pixman_image_get_width(vd->server);
 
     y = 0;
-    for (;;) {
-        int x, h;
-        unsigned long x2;
-        unsigned long offset = find_next_bit((unsigned long *) &vs->dirty,
-                                             height * VNC_DIRTY_BPL(vs),
-                                             y * VNC_DIRTY_BPL(vs));
-        if (offset == height * VNC_DIRTY_BPL(vs)) {
-            /* no more dirty bits */
-            break;
-        }
-        y = offset / VNC_DIRTY_BPL(vs);
-        x = offset % VNC_DIRTY_BPL(vs);
-        x2 = find_next_zero_bit((unsigned long *) &vs->dirty[y],
-                                VNC_DIRTY_BPL(vs), x);
-        bitmap_clear(vs->dirty[y], x, x2 - x);
-        h = find_and_clear_dirty_height(vs, y, x, x2, height);
-        x2 = MIN(x2, width / VNC_DIRTY_PIXELS_PER_BIT);
-        if (x2 > x) {
-            n += vnc_job_add_rect(job, x * VNC_DIRTY_PIXELS_PER_BIT, y,
-                                  (x2 - x) * VNC_DIRTY_PIXELS_PER_BIT, h);
-        }
-        if (!x && x2 == width / VNC_DIRTY_PIXELS_PER_BIT) {
-            y += h;
-            if (y == height) {
-                break;
-            }
-        }
+    //autre que Raw oncheck dirty
+    if(vs->vnc_encoding != VNC_ENCODING_RAW){
+		for (;;) {
+			int x, h;
+			unsigned long x2;
+			unsigned long offset = find_next_bit((unsigned long *) &vs->dirty,
+												 height * VNC_DIRTY_BPL(vs),
+												 y * VNC_DIRTY_BPL(vs));
+			if (offset == height * VNC_DIRTY_BPL(vs)) {
+				/* no more dirty bits */
+				break;
+			}
+			y = offset / VNC_DIRTY_BPL(vs);
+			x = offset % VNC_DIRTY_BPL(vs);
+			x2 = find_next_zero_bit((unsigned long *) &vs->dirty[y],
+									VNC_DIRTY_BPL(vs), x);
+			bitmap_clear(vs->dirty[y], x, x2 - x);
+			h = find_and_clear_dirty_height(vs, y, x, x2, height);
+			x2 = MIN(x2, width / VNC_DIRTY_PIXELS_PER_BIT);
+			if (x2 > x) {
+				n += vnc_job_add_rect(job, x * VNC_DIRTY_PIXELS_PER_BIT, y,
+									  (x2 - x) * VNC_DIRTY_PIXELS_PER_BIT, h);
+			}
+			if (!x && x2 == width / VNC_DIRTY_PIXELS_PER_BIT) {
+				y += h;
+				if (y == height) {
+					break;
+				}
+			}
+		}
     }
+    else {
 
+    	n += vnc_job_add_rect(job, 0, 0,width,height);
+
+    }
     vs->job_update = vs->update;
     vs->update = VNC_STATE_UPDATE_NONE;
     vnc_job_push(job);
@@ -3099,105 +3284,117 @@ static void vnc_rect_updated(VncDisplay *vd, int x, int y, struct timeval * tv)
 
 static int vnc_refresh_server_surface(VncDisplay *vd)
 {
-    int width = MIN(pixman_image_get_width(vd->guest.fb),
-                    pixman_image_get_width(vd->server));
-    int height = MIN(pixman_image_get_height(vd->guest.fb),
-                     pixman_image_get_height(vd->server));
-    int cmp_bytes, server_stride, line_bytes, guest_ll, guest_stride, y = 0;
-    uint8_t *guest_row0 = NULL, *server_row0;
-    VncState *vs;
-    int has_dirty = 0;
-    pixman_image_t *tmpbuf = NULL;
-    unsigned long offset;
-    int x;
-    uint8_t *guest_ptr, *server_ptr;
+	//only if no raw encoding
+	if(vd->clients.tqh_first->vnc_encoding !=0 ){
+		int width = MIN(pixman_image_get_width(vd->guest.fb),
+						pixman_image_get_width(vd->server));
+		int height = MIN(pixman_image_get_height(vd->guest.fb),
+						 pixman_image_get_height(vd->server));
+		int cmp_bytes, server_stride, line_bytes, guest_ll, guest_stride, y = 0;
+		uint8_t *guest_row0 = NULL, *server_row0;
+		VncState *vs;
+		int has_dirty = 0;
+		pixman_image_t *tmpbuf = NULL;
+		unsigned long offset;
+		int x;
+		uint8_t *guest_ptr, *server_ptr;
 
-    struct timeval tv = { 0, 0 };
+		struct timeval tv = { 0, 0 };
 
-    if (!vd->non_adaptive) {
-        gettimeofday(&tv, NULL);
-        has_dirty = vnc_update_stats(vd, &tv);
-    }
+		if (!vd->non_adaptive) {
+			gettimeofday(&tv, NULL);
+			has_dirty = vnc_update_stats(vd, &tv);
+		}
 
-    offset = find_next_bit((unsigned long *) &vd->guest.dirty,
-                           height * VNC_DIRTY_BPL(&vd->guest), 0);
-    if (offset == height * VNC_DIRTY_BPL(&vd->guest)) {
-        /* no dirty bits in guest surface */
-        return has_dirty;
-    }
+		offset = find_next_bit((unsigned long *) &vd->guest.dirty,
+							   height * VNC_DIRTY_BPL(&vd->guest), 0);
+		if (offset == height * VNC_DIRTY_BPL(&vd->guest)) {
+			/* no dirty bits in guest surface */
+			return has_dirty;
+		}
 
-    /*
-     * Walk through the guest dirty map.
-     * Check and copy modified bits from guest to server surface.
-     * Update server dirty map.
-     */
-    server_row0 = (uint8_t *)pixman_image_get_data(vd->server);
-    server_stride = guest_stride = guest_ll =
-        pixman_image_get_stride(vd->server);
-    cmp_bytes = MIN(VNC_DIRTY_PIXELS_PER_BIT * VNC_SERVER_FB_BYTES,
-                    server_stride);
-    if (vd->guest.format != VNC_SERVER_FB_FORMAT) {
-        int w = pixman_image_get_width(vd->server);
-        tmpbuf = qemu_pixman_linebuf_create(VNC_SERVER_FB_FORMAT, w);
-    } else {
-        int guest_bpp =
-            PIXMAN_FORMAT_BPP(pixman_image_get_format(vd->guest.fb));
-        guest_row0 = (uint8_t *)pixman_image_get_data(vd->guest.fb);
-        guest_stride = pixman_image_get_stride(vd->guest.fb);
-        guest_ll = pixman_image_get_width(vd->guest.fb)
-                   * DIV_ROUND_UP(guest_bpp, 8);
-    }
-    line_bytes = MIN(server_stride, guest_ll);
+		/*
+		 * Walk through the guest dirty map.
+		 * Check and copy modified bits from guest to server surface.
+		 * Update server dirty map.
+		 */
+		server_row0 = (uint8_t *)pixman_image_get_data(vd->server);
+		server_stride = guest_stride = guest_ll =
+			pixman_image_get_stride(vd->server);
+		cmp_bytes = MIN(VNC_DIRTY_PIXELS_PER_BIT * VNC_SERVER_FB_BYTES,
+						server_stride);
+		if (vd->guest.format != VNC_SERVER_FB_FORMAT) {
+			int w = pixman_image_get_width(vd->server);
+			tmpbuf = qemu_pixman_linebuf_create(VNC_SERVER_FB_FORMAT, w);
+		} else {
+			int guest_bpp =
+				PIXMAN_FORMAT_BPP(pixman_image_get_format(vd->guest.fb));
+			guest_row0 = (uint8_t *)pixman_image_get_data(vd->guest.fb);
+			guest_stride = pixman_image_get_stride(vd->guest.fb);
+			guest_ll = pixman_image_get_width(vd->guest.fb)
+					   * DIV_ROUND_UP(guest_bpp, 8);
+		}
+		line_bytes = MIN(server_stride, guest_ll);
 
-    for (;;) {
-        y = offset / VNC_DIRTY_BPL(&vd->guest);
-        x = offset % VNC_DIRTY_BPL(&vd->guest);
+		for (;;) {
+			y = offset / VNC_DIRTY_BPL(&vd->guest);
+			x = offset % VNC_DIRTY_BPL(&vd->guest);
 
-        server_ptr = server_row0 + y * server_stride + x * cmp_bytes;
+			server_ptr = server_row0 + y * server_stride + x * cmp_bytes;
 
-        if (vd->guest.format != VNC_SERVER_FB_FORMAT) {
-            qemu_pixman_linebuf_fill(tmpbuf, vd->guest.fb, width, 0, y);
-            guest_ptr = (uint8_t *)pixman_image_get_data(tmpbuf);
-        } else {
-            guest_ptr = guest_row0 + y * guest_stride;
-        }
-        guest_ptr += x * cmp_bytes;
+			if (vd->guest.format != VNC_SERVER_FB_FORMAT) {
+				qemu_pixman_linebuf_fill(tmpbuf, vd->guest.fb, width, 0, y);
+				guest_ptr = (uint8_t *)pixman_image_get_data(tmpbuf);
+			} else {
+				guest_ptr = guest_row0 + y * guest_stride;
+			}
+			guest_ptr += x * cmp_bytes;
 
-        for (; x < DIV_ROUND_UP(width, VNC_DIRTY_PIXELS_PER_BIT);
-             x++, guest_ptr += cmp_bytes, server_ptr += cmp_bytes) {
-            int _cmp_bytes = cmp_bytes;
-            if (!test_and_clear_bit(x, vd->guest.dirty[y])) {
-                continue;
-            }
-            if ((x + 1) * cmp_bytes > line_bytes) {
-                _cmp_bytes = line_bytes - x * cmp_bytes;
-            }
-            assert(_cmp_bytes >= 0);
-            if (memcmp(server_ptr, guest_ptr, _cmp_bytes) == 0) {
-                continue;
-            }
-            memcpy(server_ptr, guest_ptr, _cmp_bytes);
-            if (!vd->non_adaptive) {
-                vnc_rect_updated(vd, x * VNC_DIRTY_PIXELS_PER_BIT,
-                                 y, &tv);
-            }
-            QTAILQ_FOREACH(vs, &vd->clients, next) {
-                set_bit(x, vs->dirty[y]);
-            }
-            has_dirty++;
-        }
+			for (; x < DIV_ROUND_UP(width, VNC_DIRTY_PIXELS_PER_BIT);
+				 x++, guest_ptr += cmp_bytes, server_ptr += cmp_bytes) {
+				int _cmp_bytes = cmp_bytes;
+				if (!test_and_clear_bit(x, vd->guest.dirty[y])) {
+					continue;
+				}
+				if ((x + 1) * cmp_bytes > line_bytes) {
+					_cmp_bytes = line_bytes - x * cmp_bytes;
+				}
+				assert(_cmp_bytes >= 0);
+				if (memcmp(server_ptr, guest_ptr, _cmp_bytes) == 0) {
+					continue;
+				}
+				memcpy(server_ptr, guest_ptr, _cmp_bytes);
+				if (!vd->non_adaptive) {
+					vnc_rect_updated(vd, x * VNC_DIRTY_PIXELS_PER_BIT,
+									 y, &tv);
+				}
+				QTAILQ_FOREACH(vs, &vd->clients, next) {
+					set_bit(x, vs->dirty[y]);
+				}
+				has_dirty++;
+			}
 
-        y++;
-        offset = find_next_bit((unsigned long *) &vd->guest.dirty,
-                               height * VNC_DIRTY_BPL(&vd->guest),
-                               y * VNC_DIRTY_BPL(&vd->guest));
-        if (offset == height * VNC_DIRTY_BPL(&vd->guest)) {
-            /* no more dirty bits */
-            break;
-        }
-    }
-    qemu_pixman_image_unref(tmpbuf);
-    return has_dirty;
+			y++;
+			offset = find_next_bit((unsigned long *) &vd->guest.dirty,
+								   height * VNC_DIRTY_BPL(&vd->guest),
+								   y * VNC_DIRTY_BPL(&vd->guest));
+			if (offset == height * VNC_DIRTY_BPL(&vd->guest)) {
+				/* no more dirty bits */
+				break;
+			}
+		}
+		qemu_pixman_image_unref(tmpbuf);
+		return has_dirty;
+	}else {
+		uint8_t *guest_ptr, *server_ptr;
+			int w = pixman_image_get_width(vd->server);
+		int h= pixman_image_get_height(vd->server);
+
+		server_ptr = (uint8_t *)pixman_image_get_data(vd->server);
+		guest_ptr = (uint8_t *)pixman_image_get_data(vd->guest.fb);
+		memcpy(server_ptr, guest_ptr, w*h*4);
+		return 1;
+	}
 }
 
 static void vnc_refresh(DisplayChangeListener *dcl)
@@ -3274,6 +3471,9 @@ static void vnc_connect(VncDisplay *vd, QIOChannelSocket *sioc,
     buffer_init(&vs->zrle->fb,        "vnc-zrle-fb/%p", sioc);
     buffer_init(&vs->zrle->zlib,      "vnc-zrle-zlib/%p", sioc);
 
+   	vd->cuda_init=true;
+
+    /**/
     if (skipauth) {
         vs->auth = VNC_AUTH_NONE;
         vs->subauth = VNC_AUTH_INVALID;
@@ -3594,7 +3794,11 @@ static QemuOptsList qemu_vnc_opts = {
         },{
             .name = "power-control",
             .type = QEMU_OPT_BOOL,
-        },
+        },{
+            .name = "cuda_slot",
+            .type = QEMU_OPT_NUMBER,
+         },
+
         { /* end of list */ }
     },
 };
@@ -4134,6 +4338,11 @@ void vnc_display_open(const char *id, Error **errp)
 
 #ifdef CONFIG_VNC_JPEG
     vd->lossy = qemu_opt_get_bool(opts, "lossy", false);
+    vd->cuda_slot = qemu_opt_get_number(opts, "cuda_slot", -1);
+    if( vd->cuda_slot != -1) {
+		vd->cuda_init=true;
+		printf(" cuda_slot=%d\n",vd->cuda_slot);
+    }
 #endif
     vd->non_adaptive = qemu_opt_get_bool(opts, "non-adaptive", false);
     /* adaptive updates are only used with tight encoding and

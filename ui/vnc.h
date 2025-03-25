@@ -185,6 +185,8 @@ struct VncDisplay
 #endif
 
     AudioState *audio_state;
+    bool cuda_init;
+    int cuda_slot;
 };
 
 typedef struct VncTight {

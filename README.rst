@@ -54,9 +54,22 @@ of other UNIX targets. The simple steps to build QEMU are:
 
   mkdir build
   cd build
-  ../configure
-  make
+  ../configure --target-list=x86_64-softmmu --enable-slirp --enable-debug --audio-drv-list=pa
+  make -j8
 
+ Test 
+ ../qemu-system-x86_64 -m 4096 -enable-kvm \
+ -drive if=virtio,file=/test.qcow2,cache=writeback \
+ -smp 4 \
+ -M q35 \
+ -nic user,model=virtio-net-pci \
+ -device virtio-vga \
+ -audiodev none,id=audiodev0 \
+ -device ac97,audiodev=audiodev0 \
+ -vnc :1,cuda_slot=1,audiodev=audiodev0
+  
+  
+  
 Additional information can also be found online via the QEMU website:
 
 * `<https://wiki.qemu.org/Hosts/Linux>`_

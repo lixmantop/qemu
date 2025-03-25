@@ -97,6 +97,9 @@ static void gui_update(void *opaque)
             interval = dcl_interval;
         }
     }
+
+    interval=40;//30=30image/s 40=25image/s
+
     if (ds->update_interval != interval) {
         ds->update_interval = interval;
         trace_console_refresh(interval);
