@@ -40,8 +40,8 @@ docker run --volume ${TOPDIR}:/home --interactive --rm qemu/${DOCKER} \
 	mkdir build
 	cd build
 	../configure --target-list=x86_64-softmmu --enable-slirp --enable-debug --audio-drv-list=pa
-	make
+	make -j2
 	"
 
 mkdir -p ${CURDIR}/result
-cp -av ${CURDIR}/build/qemu-system* ${CURDIR}/result
+cp -av ${TOPDIR}/build/qemu-system* ${CURDIR}/result
