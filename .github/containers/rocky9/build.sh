@@ -31,8 +31,9 @@ TOPDIR=$(git rev-parse --show-toplevel 2>/dev/null)
 
 ## Start the build
 
-docker run --volume ${CURDIR}/build:/home --interactive --rm qemu/${DOCKER} \
+docker run --volume ${TOPDIR}:/home --interactive --rm qemu/${DOCKER} \
 	bash -e -x -c "
+ 	ls -l
 	sudo dnf -y install wget python3-tomli libjpeg-turbo-devel
 	wget https://dl.rockylinux.org/pub/rocky/9.5/devel/source/tree/Packages/q/qemu-kvm-9.0.0-10.el9_5.2.src.rpm
 	dnf builddep -y qemu-kvm-9.0.0-10.el9_5.2.src.rpm
