@@ -67,7 +67,13 @@ of other UNIX targets. The simple steps to build QEMU are:
  -audiodev none,id=audiodev0 \
  -device ac97,audiodev=audiodev0 \
  -vnc :1,cuda_slot=1,audiodev=audiodev0
-  
+
+Other conf of sound
+-audiodev none,id=audiodev0 \
+-device ich9-intel-hda,bus=pcie.0,addr=0x3 \
+-device hda-output,audiodev=audiodev0 \
+
+
   
   
 Additional information can also be found online via the QEMU website:
