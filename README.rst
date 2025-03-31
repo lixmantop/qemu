@@ -68,10 +68,15 @@ of other UNIX targets. The simple steps to build QEMU are:
  -device ac97,audiodev=audiodev0 \
  -vnc :1,cuda_slot=1,audiodev=audiodev0
 
-Other conf of sound
+Other conf of sound 
 -audiodev none,id=audiodev0 \
 -device ich9-intel-hda,bus=pcie.0,addr=0x3 \
 -device hda-output,audiodev=audiodev0 \
+
+
+Bridge 
+-device virtio-net-pci,netdev=user0,mac=52:54:xx:xx:xx:xx \
+-netdev bridge,id=user0,br=br0,helper=/xx/qemu-bridge-helper \
 
 
   
