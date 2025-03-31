@@ -44,4 +44,4 @@ docker run --volume ${TOPDIR}:/home --interactive --rm qemu/${DOCKER} \
 	"
 
 mkdir -p ${CURDIR}/result
-cp -av ${TOPDIR}/build/qemu-system* ${CURDIR}/result
+cp -av ${TOPDIR}/build/qemu-* ${CURDIR}/result
